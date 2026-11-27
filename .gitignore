@@ -1,0 +1,9 @@
+# Build scratch for the guest initramfs (recreatable by build-initramfs.sh)
+guest/build/
+# QEMU test disk image (recreatable)
+guest/test/test-disk.img
+# Swift build products
+launcher/.build/
+launcher/btrfs-vm
+# Built guest artifacts are kept in the repo for now (vmlinuz, initramfs)
+# because the MBP should not need a Linux box to obtain them.

@@ -1,0 +1,64 @@
+name: launcher (Intel Mac)
+
+# Compile-test the Swift launcher on an Intel Mac runner.
+# The target machine (2018 MacBook Pro) is Intel / x86_64, and
+# macos-15-intel is both the same architecture and, in our experience,
+# far easier to acquire than the arm64 macOS runners.
+#
+# Scope: build + ad-hoc codesign + --help smoke test only.
+# GitHub-hosted runners cannot actually start a Virtualization.framework
+# VM, so booting the guest still requires the real MBP (or the QEMU
+# boot test that already covers the guest side).
+
+on:
+  push:
+    paths:
+      - "launcher/**"
+      - ".github/workflows/launcher-intel-mac.yml"
+  pull_request:
+    paths:
+      - "launcher/**"
+      - ".github/workflows/launcher-intel-mac.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          swift --version
+          xcodebuild -version || true
+
+      - name: Build launcher (release, codesigned with entitlements)
+        working-directory: launcher
+        run: ./build.sh
+
+      - name: Verify signature and entitlements
+        working-directory: launcher
+        run: |
+          codesign --verify --verbose ./btrfs-vm
+          codesign --display --entitlements - ./btrfs-vm | grep -A1 virtualization
+
+      - name: Smoke test (--help prints usage, exit 2 by design)
+        working-directory: launcher
+        run: |
+          set +e
+          ./btrfs-vm --help 2> help.txt
+          status=$?
+          set -e
+          cat help.txt
+          test "$status" -eq 2
+          grep -q "VZDiskBlockDevice\|--device" help.txt || grep -q -- "--device" help.txt
+
+      - name: Upload built launcher
+        uses: actions/upload-artifact@v4
+        with:
+          name: btrfs-vm-macos-intel
+          path: launcher/btrfs-vm
+          if-no-files-found: error

@@ -1,0 +1,32 @@
+Suppressing macOS automount of the USB disk
+============================================
+
+The launcher already unmounts the disk (diskutil unmountDisk force)
+before starting the VM, so this step is belt-and-braces: it stops
+Finder / Disk Arbitration from mounting the disk at login or at
+re-plug time, which would fight the guest for the device.
+
+1. Identify the disk and its volume UUIDs:
+
+     diskutil list external
+     diskutil info /dev/diskN        # note the "Volume UUID" of each
+                                     # partition, and the disk UUID
+
+   A Btrfs-formatted disk usually shows up as a single Linux partition
+   with no macOS-mountable volumes; in that case macOS will not try to
+   mount it anyway and this snippet is optional. It matters most while
+   the disk still carries an exFAT/APFS partition during setup.
+
+2. For every volume UUID that macOS would automount, add one line to
+   /etc/fstab (create the file if it does not exist; edit with
+   `sudo vifs`):
+
+     UUID=<VOLUME-UUID> none auto noauto
+
+   Example (replace with the UUID from step 1):
+
+     UUID=12345678-1234-1234-1234-1234567890AB none auto noauto
+
+3. Verify: replug the disk (or `diskutil unmountDisk` + replug) and
+   confirm nothing mounts (`mount | grep diskN` prints nothing), then
+   start the VM with the launcher.

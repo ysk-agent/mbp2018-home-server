@@ -1,0 +1,176 @@
+#!/bin/sh
+# btrfs-vm guest /init — busybox sh, PID 1. Must never exit.
+#
+# Boot flow:
+#   1. mount proc/sys/dev, load virtio + btrfs modules
+#   2. bring up eth0 with DHCP (VZ NAT: 192.168.64.0/24)
+#   3. mount /dev/vda as Btrfs (compress=zstd,noatime) on /mnt/usb
+#      - an unformatted disk is only formatted when the kernel cmdline
+#        contains btrfs_format=1; otherwise we print instructions and
+#        continue without a mount (SSH still comes up for manual work)
+#   4. start the exports that are actually present in this initramfs:
+#      kernel NFS (nfsd) as primary, dropbear SSH/SFTP for admin,
+#      ksmbd (SMB) if its module + daemon were included at build time
+#   5. print a prominent banner with the guest IP and mount status
+#   6. hand the console to a shell; if the shell exits, respawn it
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+KVER=$(uname -r)
+
+say() { echo "btrfs-vm: $*"; }
+
+# --- 1. filesystems and modules -------------------------------------
+mount -t proc     proc     /proc
+# /proc/cmdline is only readable after proc is mounted.
+CMDLINE=$(cat /proc/cmdline)
+mount -t sysfs    sysfs    /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /mnt/usb /var/log
+mount -t devpts devpts /dev/pts 2>/dev/null
+
+# Module dependencies are resolved by busybox modprobe via modules.dep.
+for m in virtio virtio_ring virtio_pci virtio_blk virtio_net \
+         libcrc32c crc32c_generic xxhash lzo_compress zlib_deflate \
+         zstd_compress btrfs; do
+    modprobe $m 2>/dev/null
+done
+# mdev as a fallback if devtmpfs did not populate (it normally does).
+[ -x /sbin/mdev ] && mdev -s 2>/dev/null
+
+# --- 2. network ------------------------------------------------------
+ip link set lo up
+ip link set eth0 up 2>/dev/null
+IP=""
+if command -v udhcpc >/dev/null; then
+    udhcpc -i eth0 -n -q -t 5 -s /etc/udhcpc/default.script 2>/dev/null
+    IP=$(ip -4 addr show eth0 2>/dev/null | awk '/inet /{print $2}' | head -1)
+fi
+[ -z "$IP" ] && IP="(no DHCP lease — check the VZ NAT network)"
+
+# --- 3. Btrfs mount ---------------------------------------------------
+MOUNTED=0
+i=0
+while [ ! -b /dev/vda ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i+1)); done
+
+if [ -b /dev/vda ]; then
+    btrfs device scan >/dev/null 2>&1
+    if mount -t btrfs -o compress=zstd,noatime /dev/vda /mnt/usb 2>/tmp/mount.err; then
+        MOUNTED=1
+    else
+        say "mount of /dev/vda failed: $(cat /tmp/mount.err)"
+        case "$CMDLINE" in
+        *btrfs_format=1*)
+            say "btrfs_format=1 on cmdline: formatting /dev/vda (mkfs.btrfs -f)"
+            if mkfs.btrfs -f /dev/vda && \
+               mount -t btrfs -o compress=zstd,noatime /dev/vda /mnt/usb; then
+                MOUNTED=1
+            else
+                say "ERROR: format/mount failed"
+            fi
+            ;;
+        *)
+            say "disk looks unformatted (or is not Btrfs) and btrfs_format=1"
+            say "was NOT given, so nothing was written to it."
+            say "To format on next boot, add btrfs_format=1 to --cmdline."
+            say "Or log in via SSH/console and run: mkfs.btrfs -f /dev/vda"
+            ;;
+        esac
+    fi
+else
+    say "ERROR: /dev/vda never appeared — is a disk attached?"
+fi
+
+# --- 4. exports --------------------------------------------------------
+if [ $MOUNTED -eq 1 ]; then
+    # -- kernel NFS (primary export) --
+    if [ -d /proc/fs/nfsd ] || modprobe nfsd 2>/dev/null; then
+        mkdir -p /var/lib/nfs/rpc_pipefs /var/lib/nfs/v4recovery
+        mount -t rpc_pipefs sunrpc /var/lib/nfs/rpc_pipefs 2>/dev/null
+        mount -t nfsd nfsd /proc/fs/nfsd 2>/dev/null
+        # NFS export, restricted to the VZ NAT subnet (host-only in
+        # practice). no_root_squash because the only client is the host
+        # itself; see README "Security notes".
+        echo "/mnt/usb 192.168.64.0/24(rw,sync,no_subtree_check,insecure,no_root_squash)" > /etc/exports
+        # NFSv4 only: v4 needs no portmapper/rpcbind (clients connect
+        # to tcp/2049 directly), and rpcbind proved unreliable in this
+        # minimal initramfs (daemonizes, then exits silently). rpcbind
+        # and rpc.mountd are still in the image for manual v3 use.
+        exportfs -ra 2>/dev/null
+        if [ -x /usr/sbin/rpc.nfsd ]; then
+            rpc.nfsd --no-nfs-version 3 2 \
+                && say "NFSv4 export up: 192.168.64.0/24 -> /mnt/usb" \
+                || say "rpc.nfsd failed (see console log)"
+        fi
+    else
+        say "nfsd module not available in this build; NFS export skipped"
+    fi
+
+    # -- ksmbd / SMB (optional, only if built in) --
+    case "$CMDLINE" in *ksmbd=0*) say "ksmbd disabled via cmdline" ;;
+    *)
+        if modprobe ksmbd 2>/dev/null && [ -x /usr/sbin/ksmbd.mountd ]; then
+            mkdir -p /etc/ksmbd
+            cat > /etc/ksmbd/ksmbd.conf <<'EOF'
+[global]
+    workgroup = WORKGROUP
+    server string = btrfs-vm
+    netbios name = BTRFSVM
+    server max protocol = SMB3
+    guest ok = yes
+[usb]
+    path = /mnt/usb
+    read only = no
+    guest ok = yes
+    create mask = 0664
+    directory mask = 0775
+EOF
+            ksmbd.mountd && say "SMB export up: \\\\guest\\usb (guest access)"
+        fi
+        ;;
+    esac
+
+    # Persistent dropbear host keys + authorized_keys live on the USB
+    # disk itself, so they survive reboots of the (stateless) guest.
+    mkdir -p /mnt/usb/.btrfs-vm/dropbear /mnt/usb/.btrfs-vm/ssh
+    mkdir -p /etc/dropbear /root/.ssh
+    for k in rsa ecdsa ed25519; do
+        f=/mnt/usb/.btrfs-vm/dropbear/dropbear_${k}_host_key
+        [ -f "$f" ] || dropbearkey -t $k -f "$f" >/dev/null 2>&1
+        [ -f "$f" ] && ln -sf "$f" /etc/dropbear/
+    done
+    [ -f /mnt/usb/.btrfs-vm/ssh/authorized_keys ] && \
+        cp /mnt/usb/.btrfs-vm/ssh/authorized_keys /root/.ssh/authorized_keys
+fi
+
+# -- dropbear SSH/SFTP (admin path; starts even without a mount) --
+mkdir -p /etc/dropbear
+if command -v dropbear >/dev/null; then
+    dropbear -R -B 2>/dev/null \
+        && say "dropbear SSH up on port 22 (root; see README for credentials)" \
+        || say "dropbear failed to start"
+fi
+
+# --- 5. banner ---------------------------------------------------------
+echo ""
+echo "=============================================================="
+if [ $MOUNTED -eq 1 ]; then
+    echo " btrfs-vm guest up: IP $IP"
+    echo " /mnt/usb mounted from /dev/vda (btrfs, compress=zstd,noatime)"
+    df -h /mnt/usb 2>/dev/null | tail -1
+    echo " Host: mount_nfs -o vers=4 <guest-ip>:/mnt/usb /Volumes/usb"
+    echo "       or SMB smb://<guest-ip>/usb , or ssh root@<guest-ip>"
+else
+    echo " btrfs-vm guest up: IP $IP"
+    echo " WARNING: /mnt/usb is NOT mounted (see messages above)."
+    echo " Exports are off; SSH/console are available for manual setup."
+fi
+echo "=============================================================="
+echo ""
+
+# --- 6. console shell, respawning forever (init must not exit) --------
+sync
+while true; do
+    setsid cttyhack sh -l </dev/console >/dev/console 2>&1
+    say "console shell exited; respawning in 2s (Ctrl-C the launcher on the host to stop the VM)"
+    sleep 2
+done

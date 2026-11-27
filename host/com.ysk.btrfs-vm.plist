@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchDaemon for btrfs-vm. Raw block devices require root, so this is
+  a LaunchDaemon (install in /Library/LaunchDaemons, owned by root),
+  not a per-user LaunchAgent.
+
+  Before loading, edit:
+    * /dev/disk4            : the USB disk (diskutil list external)
+    * /usr/local/btrfs-vm/  : where you installed the launcher,
+                               vmlinuz and initramfs.cpio.gz
+    * Add btrfs_format=1 to the cmdline value ONLY for the very
+      first run against an unformatted disk, then remove it again.
+
+  Load with:
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.ysk.btrfs-vm.plist
+  Logs land in /var/log/btrfs-vm.log (serial console) and
+  /var/log/btrfs-vm.err.log (launcher stderr).
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.ysk.btrfs-vm</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/btrfs-vm/btrfs-vm</string>
+		<string>run</string>
+		<string>--device</string>
+		<string>/dev/disk4</string>
+		<string>--i-understand-this-is-the-usb-disk</string>
+		<string>--cpus</string>
+		<string>1</string>
+		<string>--memory-mib</string>
+		<string>256</string>
+		<string>--kernel</string>
+		<string>/usr/local/btrfs-vm/vmlinuz</string>
+		<string>--initrd</string>
+		<string>/usr/local/btrfs-vm/initramfs.cpio.gz</string>
+		<string>--cmdline</string>
+		<string>console=ttyS0</string>
+		<string>--log-file</string>
+		<string>/var/log/btrfs-vm.log</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>15</integer>
+	<key>StandardErrorPath</key>
+	<string>/var/log/btrfs-vm.err.log</string>
+</dict>
+</plist>
