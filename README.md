@@ -195,8 +195,8 @@ regularly; stay at 128–256 MiB if the Mac's 8 GB is contested.
 - **macOS 14+ is required** for the raw-device attachment API; the
   2018 MBP's final OS (Sequoia 15) satisfies this.
 - The launcher **cannot be compiled on the build VM** (Linux, no
-  Virtualization.framework); it is written against the documented API
-  and must be compiled on the MBP.
+  Virtualization.framework); it is compile-tested on GitHub Actions
+  (`macos-15-intel`, see below) and must be run on the MBP.
 - NFS is v4-only (see above); rpcbind/rpc.mountd are shipped but not
   started by `/init`.
 - In the guest, dropbear host keys are generated on first boot and
@@ -239,10 +239,21 @@ mounted (the format flag was ignored), host/glibc-mixed libraries
 transitive library (`libgmp` for dropbear), and a missing
 `/etc/services` (rpc.nfsd could not resolve the `nfs` port).
 
+**Compile-tested on GitHub Actions (Intel Mac)** — workflow
+`.github/workflows/launcher-intel-mac.yml` on `macos-15-intel`:
+the first run (45935120707) failed with three real compile errors
+(the `FileHandle(forUpdatingAtPath:)` Optional/ternary mix, and
+`VZVirtioConsoleDeviceSerialPortConfiguration` /
+`VZVirtioNetworkDeviceConfiguration` having no attachment-taking
+initializer); after fixing them, run 45935251632 passed all steps
+(release build, codesign + entitlement verification, `--help`
+smoke test, artifact upload) in 1m17s. GitHub runners cannot start
+a Virtualization.framework VM, so this covers compilation only.
+
 **Not yet verified** (needs the real MacBook Pro):
 
-- The Swift launcher compiling and running (no Virtualization
-  framework on the build VM).
+- The Swift launcher actually running a VM (Actions covers the
+  compile, not VM startup).
 - Raw-device passthrough of a physical USB disk, including the
   `diskutil` claim flow and internal-disk refusal paths.
 - VZ NAT addressing (192.168.64.0/24) and the guest-IP banner under
