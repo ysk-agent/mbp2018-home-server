@@ -50,10 +50,23 @@ jobs:
           # the guest's btrfs_format=1 path for this purpose.
           fallocate -l 256M guest/test/test-disk.img
           mkfs.btrfs -f guest/test/test-disk.img
+      - name: Load the host NFS client module
+        run: |
+          # Without this, mount.nfs fails with "Protocol not supported"
+          # on the runner kernel (the module is present but not loaded).
+          sudo modprobe -a nfs nfsv4 || true
+          grep -w nfs /proc/filesystems || true
       - name: Datapath scenario (one boot — NFS + SMB + SSH + compression + scrub)
         run: sudo python3 guest/test/run_tests.py datapath
       - name: Assert key results in the log
-        run: 'grep -a "guest up: IP" guest/test/boot-datapath.log'
+        # NFS host mount and SSH login/transfer are asserted for real.
+        # SMB is logged but not asserted: tree connect is a known
+        # failure (NT_STATUS_BAD_NETWORK_NAME) pending the macOS-client
+        # retest in the session kit; see README.
+        run: |
+          grep -a "guest up: IP" guest/test/boot-datapath.log
+          grep -a "HOST_NFS_MOUNT=PASS" guest/test/boot-datapath.log
+          grep -a "ssh password(btrfsvm) login: PASS" guest/test/boot-datapath.log
       - name: Upload guest test log
         if: always()
         uses: actions/upload-artifact@v4

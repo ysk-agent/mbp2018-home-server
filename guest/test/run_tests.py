@@ -164,8 +164,9 @@ def scenario_datapath():
         g.host_say("NFS dir listing: " + " ".join(sorted(os.listdir(mnt))))
         subprocess.run(["umount", mnt], capture_output=True, timeout=30)
     else:
-        g.host_say("HOST NFS MOUNT FAILED (expected in sandboxes whose "
-                   "kernel lacks an NFS client; CI runners have one)")
+        g.host_say("HOST NFS MOUNT FAILED (host kernel NFS client "
+                   "unavailable or export refused)")
+    g.host_say("HOST_NFS_MOUNT=%s" % ("PASS" if nfs_host_ok else "FAIL"))
 
     # --- host-side: SMB data path (test 2) ---
     with open("/tmp/smb-put.txt", "w") as f:
@@ -213,17 +214,11 @@ def scenario_datapath():
     out = g.cmd("ls -l /mnt/usb; cat /mnt/usb/HOST_NFS.txt /mnt/usb/HOST_SMB.txt /mnt/usb/HOST_SCP.txt 2>&1; sync")
     g.host_say("guest verification of host-written files:\n" + out)
 
-    # --- in-guest loopback NFS mount: only when the host mount was
-    # unavailable (e.g. this sandbox's kernel has no NFS client).
-    # LAST guest action: a hung NFS mount cannot poison earlier
-    # checks; guest-side timeout caps it at 100s (nfsd grace period).
-    # NOTE: loopback mounting a guest's own nfsd timed out at 100s in
-    # local runs (MOUNT_RC=143) — recorded as a local FAIL; the
-    # host-side mount above is the authoritative NFS test.
-    if not nfs_host_ok:
-        out = g.cmd("mkdir -p /mnt/nfsloop; timeout 100 mount -t nfs4 -o port=2049 127.0.0.1:/mnt/usb /mnt/nfsloop 2>&1; "
-                    "echo MOUNT_RC=$?; ls /mnt/nfsloop 2>&1 | head -5", timeout=150)
-        g.host_say("in-guest loopback NFS mount output:\n" + out)
+    # NOTE: an in-guest loopback NFS mount (client and nfsd in the
+    # same kernel) was tried as a fallback and timed out at 100s in
+    # every run (MOUNT_RC=143) — that configuration is not a valid
+    # test of the export, so it was removed. The host-side mount
+    # above is the only authoritative NFS test.
     g.poweroff()
     print("datapath done, log:", logpath)
 
