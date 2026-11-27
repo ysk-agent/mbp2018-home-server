@@ -14,10 +14,12 @@ on:
   push:
     paths:
       - "launcher/**"
+      - "host/**"
       - ".github/workflows/launcher-intel-mac.yml"
   pull_request:
     paths:
       - "launcher/**"
+      - "host/**"
       - ".github/workflows/launcher-intel-mac.yml"
   workflow_dispatch:
 
@@ -56,9 +58,80 @@ jobs:
           test "$status" -eq 2
           grep -q "VZDiskBlockDevice\|--device" help.txt || grep -q -- "--device" help.txt
 
+      # Refusal-path tests. Check order in main.swift is: parse args ->
+      # --kernel/--initrd present -> exactly one of --device/--device-image
+      # -> kernel/initrd/image files exist -> (raw mode) ack flag ->
+      # validateRawDevice (whole-disk shape -> disk0 -> diskutil internal
+      # check) -> claimDisk -> open device -> VM creation. Every case
+      # below exits inside fail() before any VM is created, so they are
+      # safe to run on a CI runner. The internal-disk refusal for a
+      # non-disk0 internal disk (e.g. disk2 on some machines) cannot be
+      # tested here: runners have no such disk to point at, and pointing
+      # at a nonexistent diskN only exercises the diskutil-failure path.
+      - name: Refusal-path tests (no VM is ever started)
+        working-directory: launcher
+        run: |
+          # Dummy existing files for the checks that require them.
+          echo dummy > dummy-kernel
+          echo dummy > dummy-initrd
+          echo dummy > dummy.img
+          check_refusal() {
+            desc="$1"; expected="$2"; shift 2
+            set +e
+            out=$("$@" 2>&1)
+            status=$?
+            set -e
+            echo "--- $desc: exit=$status"
+            echo "$out"
+            test "$status" -ne 0
+            echo "$out" | grep -q "$expected"
+          }
+          # (a) disk0 with the ack flag -> disk0 refusal (checked before
+          #     any diskutil call).
+          check_refusal "disk0 refused" "refusing disk0" \
+            ./btrfs-vm run --device /dev/disk0 \
+              --i-understand-this-is-the-usb-disk \
+              --kernel dummy-kernel --initrd dummy-initrd
+          # (b) raw mode without the ack flag -> ack refusal (checked
+          #     before validateRawDevice, so the disk need not exist).
+          check_refusal "ack flag required" "raw-device mode requires" \
+            ./btrfs-vm run --device /dev/disk4 \
+              --kernel dummy-kernel --initrd dummy-initrd
+          # (c) partition path -> whole-disk-only refusal.
+          check_refusal "partition refused" "must be a whole disk" \
+            ./btrfs-vm run --device /dev/disk1s1 \
+              --i-understand-this-is-the-usb-disk \
+              --kernel dummy-kernel --initrd dummy-initrd
+          # (d) missing kernel file -> clear error (file-existence check
+          #     runs before any device handling).
+          check_refusal "missing kernel file" "no such file: /nonexistent/vmlinuz" \
+            ./btrfs-vm run --device-image dummy.img \
+              --kernel /nonexistent/vmlinuz --initrd dummy-initrd
+          echo "All refusal-path tests passed."
+
+      # plutil is macOS-only, so the plist lint stays in this job;
+      # the sh -n checks are independent and run in parallel in the
+      # ubuntu shell-lint job below.
+      - name: Lint launchd plist (plutil is macOS-only)
+        run: plutil -lint host/com.ysk.btrfs-vm.plist
+
       - name: Upload built launcher
         uses: actions/upload-artifact@v4
         with:
           name: btrfs-vm-macos-intel
           path: launcher/btrfs-vm
           if-no-files-found: error
+
+  shell-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check all shell scripts
+        run: |
+          sh -n launcher/build.sh
+          sh -n host/mount-usb.sh
+          sh -n host/session-kit/run-session.sh
+          sh -n guest/build-initramfs.sh
+          python3 -m py_compile guest/test/run_tests.py
+          echo "shell lint OK"

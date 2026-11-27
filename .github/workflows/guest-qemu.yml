@@ -1,0 +1,137 @@
+name: guest (QEMU)
+
+# Boot-test the committed guest kernel + initramfs under QEMU on
+# ubuntu-latest (TCG only — no KVM on GitHub runners).
+#
+# Layout rule (Yosuke, 2026-11-27): checks that can share one guest
+# boot ride in the same boot (boots are the expensive part), but jobs
+# run in PARALLEL — anything that would push one job past ~2 minutes
+# becomes its own job. apt installs are deliberately duplicated per
+# job: wall-clock time beats total runner time on a public repo.
+#
+#   job datapath:    ONE boot — mount, NFS/SMB/SSH data transfers,
+#                    compression proof, btrfs scrub
+#   job readonly:    ONE boot — read-only attach fallback
+#   job unformatted: ONE boot — unformatted disk is never written
+#   job mem128:      ONE boot — 128 MiB minimum-memory boot
+#
+# The initramfs is NOT rebuilt here (its build downloads ~120 Debian
+# packages); CI uses the committed guest/vmlinuz +
+# guest/initramfs.cpio.gz artifacts, exactly what the MBP will run.
+# Locally, `cd guest/test && python3 run_tests.py <scenario>` runs
+# the same scenarios; see the README verification section.
+
+on:
+  push:
+    paths:
+      - "guest/**"
+      - ".github/workflows/guest-qemu.yml"
+  pull_request:
+    paths:
+      - "guest/**"
+      - ".github/workflows/guest-qemu.yml"
+  workflow_dispatch:
+
+jobs:
+  datapath:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU and client tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            qemu-system-x86 btrfs-progs nfs-common smbclient sshpass python3
+      - name: Create the formatted test disk (host-side mkfs.btrfs)
+        run: |
+          # guest/test/test-disk.img is gitignored (recreatable); the
+          # scenario copies it. Host-side formatting is equivalent to
+          # the guest's btrfs_format=1 path for this purpose.
+          fallocate -l 256M guest/test/test-disk.img
+          mkfs.btrfs -f guest/test/test-disk.img
+      - name: Datapath scenario (one boot — NFS + SMB + SSH + compression + scrub)
+        run: sudo python3 guest/test/run_tests.py datapath
+      - name: Assert key results in the log
+        run: 'grep -a "guest up: IP" guest/test/boot-datapath.log'
+      - name: Upload guest test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-qemu-datapath-log
+          path: guest/test/boot-datapath.log
+          if-no-files-found: warn
+
+  readonly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            qemu-system-x86 btrfs-progs python3
+      - name: Create the formatted test disk (host-side mkfs.btrfs)
+        run: |
+          fallocate -l 256M guest/test/test-disk.img
+          mkfs.btrfs -f guest/test/test-disk.img
+      - name: Read-only fallback scenario (one boot)
+        run: sudo python3 guest/test/run_tests.py readonly
+      - name: Assert key results in the log
+        run: grep -a "READ-ONLY" guest/test/boot-readonly.log
+      - name: Upload guest test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-qemu-readonly-log
+          path: guest/test/boot-readonly.log
+          if-no-files-found: warn
+
+  unformatted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            qemu-system-x86 python3
+      - name: Unformatted-disk no-write scenario (one boot)
+        run: sudo python3 guest/test/run_tests.py unformatted
+      - name: Assert key results in the log
+        run: grep -a "IMAGE_UNCHANGED=true" guest/test/boot-unformatted.log
+      - name: Upload guest test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-qemu-unformatted-log
+          path: guest/test/boot-unformatted.log
+          if-no-files-found: warn
+
+  mem128:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            qemu-system-x86 btrfs-progs python3
+      - name: Create the formatted test disk (host-side mkfs.btrfs)
+        run: |
+          fallocate -l 256M guest/test/test-disk.img
+          mkfs.btrfs -f guest/test/test-disk.img
+      - name: Minimum-memory (128 MiB) scenario (one boot)
+        run: sudo python3 guest/test/run_tests.py mem128
+      - name: Assert key results in the log
+        run: 'grep -a "banner seen at 128MiB: True" guest/test/boot-mem128.log'
+      - name: Upload guest test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-qemu-mem128-log
+          path: guest/test/boot-mem128.log
+          if-no-files-found: warn
