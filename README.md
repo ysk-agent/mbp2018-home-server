@@ -138,13 +138,26 @@ still brings up networking + SSH so the disk can be prepared manually.
 
 - **NFSv4** — `rpc.nfsd --no-nfs-version 3`, 2 threads, export
   `/mnt/usb 192.168.64.0/24(rw,sync,no_subtree_check,insecure,no_root_squash)`.
-  NFS is v4-only because v3 needs rpcbind, whose daemonized form exits
-  silently in this minimal initramfs (its `-d -f` debug form works;
-  the binaries remain in the image for manual use). v4 needs no
-  portmapper: clients connect to tcp/2049 directly.
+  The allowed subnet is overridable with `nfs_allow=<subnet>[,<more>]`
+  on the kernel cmdline (used by the QEMU tests with
+  `nfs_allow=10.0.2.0/24,127.0.0.1`); on a read-only mount the export
+  becomes `ro` automatically. NFS is v4-only because v3 needs rpcbind,
+  whose daemonized form exits silently in this minimal initramfs (its
+  `-d -f` debug form works; the binaries remain in the image for
+  manual use). v4 needs no portmapper: clients connect to tcp/2049
+  directly.
 - **SMB** — ksmbd with a guest-access share `\\<guest-ip>\usb`
-  (disable with `ksmbd=0` on the cmdline).
-- **SSH/SFTP** — dropbear on port 22.
+  (config written to `/etc/ksmbd/ksmb.conf` — Debian's ksmbd-tools
+  does not read `ksmbd.conf`; disable with `ksmbd=0` on the cmdline).
+  **Known issue:** the share lists correctly (`smbclient -L` shows
+  `usb`), but tree connect from smbclient fails with
+  `NT_STATUS_BAD_NETWORK_NAME` as of 2026-11-27. NFS is the primary
+  path and SSH transfers work; SMB is a fallback to re-check with the
+  macOS client in the real-device session kit.
+- **SSH** — dropbear on port 22. File transfer: use
+  `ssh root@<guest-ip> 'cat > /mnt/usb/file' < file` (verified).
+  `scp` does **not** work against this guest: dropbear ships no SFTP
+  subsystem and there is no server-side `scp` binary for legacy mode.
 
 Default kernel cmdline: `console=ttyS0`.
 
@@ -162,11 +175,13 @@ disk with `diskutil list external`, optionally suppress automount via
 ## Memory sizing
 
 Default 256 MiB (`--memory-mib`, sensible range 128–512). The guest
-runs an initramfs rootfs, the Btrfs mount, nfsd, ksmbd and dropbear;
-256 MiB was the size used in the QEMU verification below and is
-comfortable. Btrfs page-cache pressure is the only real consumer —
-go to 512 MiB if the host side copies very large files over NFS
-regularly; stay at 128–256 MiB if the Mac's 8 GB is contested.
+runs an initramfs rootfs, the Btrfs mount, nfsd, ksmbd and dropbear.
+128 MiB is verified bootable with all exports up
+(`guest/test/boot-mem128.log`), but tight (MemAvailable ≈ 16 MiB);
+256 MiB is comfortable. Btrfs page-cache pressure is the only real
+consumer — go to 512 MiB if the host side copies very large files
+over NFS regularly; stay at 128–256 MiB if the Mac's 8 GB is
+contested.
 
 ## Security notes
 
@@ -204,60 +219,105 @@ regularly; stay at 128–256 MiB if the Mac's 8 GB is contested.
   change (the guest prints no fingerprint warning — check the console
   log if SSH complains).
 
-## Verification status (2026-11-27, Muse VM)
+## Verification status (2026-11-27)
 
-**Boot-tested under QEMU 8.2.2** (TCG emulation, no KVM; QEMU user
-networking instead of VZ NAT, so the guest saw 10.0.2.15 — the
-192.168.64.x addressing itself is VZ behaviour and is *not* covered
-by this test). Logs: `guest/test/boot-format.log`,
-`guest/test/boot-mount.log`.
+Real-device time on the MBP is available **once every two weeks**,
+so everything verifiable off-device is automated, and everything
+that truly needs the MBP is packaged into a single session kit
+(`host/session-kit/` — see the end of this section).
 
-Verified:
+### QEMU guest tests (`guest/test/run_tests.py`, QEMU 8.2.2, TCG)
 
-- Kernel 6.1.0-50-amd64 + initramfs boot to the guest shell;
-  `/init` executable, `/dev/console` + `/dev/null` nodes present
-  (packed with the kernel's `gen_init_cpio`, because this sandbox
-  denies `mknod` even to root; the script falls back automatically).
-- Boot 1 with `btrfs_format=1` on a blank 256 MB image: `mkfs.btrfs`
-  ran in the guest, the disk mounted at `/mnt/usb`
-  (`df`: 256.0M total), exports started.
-- Boot 2 without the format flag: the existing Btrfs mounted as-is;
-  wrote `/mnt/usb/HELLO.txt`; `btrfs subvolume snapshot /mnt/usb
-  /mnt/usb/snap1` succeeded (`SNAPSHOT_OK` in the log).
-- Exports in-guest: NFSv4 up with 2 threads and tcp/2049 listening;
-  ksmbd reported its share up; dropbear reported listening on 22.
-- Initramfs contents inspected: `btrfs.ko`, `virtio_blk.ko`,
-  `virtio_net.ko`, `nfsd.ko`, `ksmbd.ko` (+ closure, 29 modules),
-  `modules.dep`, and the `btrfs`/`mkfs.btrfs`/`rpc.nfsd`/`exportfs`/
-  `ksmbd.mountd`/`dropbear` binaries are all present.
+One boot per scenario; checks that share a boot ride together.
+QEMU user networking stands in for VZ NAT (guest sees 10.0.2.15;
+the 192.168.64.x addressing itself is VZ behaviour and is *not*
+covered here). These same scenarios run in CI —
+`.github/workflows/guest-qemu.yml`, four parallel jobs
+(datapath / readonly / unformatted / mem128) on `ubuntu-latest`
+against the committed kernel + initramfs.
 
-Bugs found by the boot test and fixed (kept here as a warning to
-future editors): a busybox self-symlink that made `/bin/sh`
-unexecutable (ELOOP at boot), `/proc/cmdline` read before proc was
-mounted (the format flag was ignored), host/glibc-mixed libraries
-(guest `mkfs.btrfs` died with `GLIBC_2.38 not found`), a missing
-transitive library (`libgmp` for dropbear), and a missing
-`/etc/services` (rpc.nfsd could not resolve the `nfs` port).
+Verified (log in `guest/test/` for each):
 
-**Compile-tested on GitHub Actions (Intel Mac)** — workflow
-`.github/workflows/launcher-intel-mac.yml` on `macos-15-intel`:
-the first run (45935120707) failed with three real compile errors
-(the `FileHandle(forUpdatingAtPath:)` Optional/ternary mix, and
-`VZVirtioConsoleDeviceSerialPortConfiguration` /
-`VZVirtioNetworkDeviceConfiguration` having no attachment-taking
-initializer); after fixing them, run 45935251632 passed all steps
-(release build, codesign + entitlement verification, `--help`
-smoke test, artifact upload) in 1m17s. GitHub runners cannot start
-a Virtualization.framework VM, so this covers compilation only.
+- **Format + mount** (`boot-format.log`, `boot-mount.log`):
+  `btrfs_format=1` on a blank image formats and mounts; without the
+  flag an existing Btrfs mounts as-is, files write, and
+  `btrfs subvolume snapshot` succeeds.
+- **SSH data path** (`boot-datapath.log`): password login
+  (`btrfsvm`) succeeds; blank/none auth is refused
+  (`Permission denied (publickey,password)`); a file transferred via
+  `ssh 'cat > …'` is verified inside the guest. `scp` does not work
+  (no SFTP subsystem, no server-side `scp` binary).
+- **Compression** (`boot-datapath.log`): a 10 MiB all-zero file on
+  `/mnt/usb` leaves Btrfs data usage at 320 KiB total
+  (`Data,single: Used: 320.00KiB`) — zstd compression is really on.
+- **Scrub** (`boot-datapath.log`): `btrfs scrub start -B /mnt/usb`
+  finishes with "no errors found", exit code 0.
+- **Read-only fallback** (`boot-readonly.log`): with the disk
+  attached read-only, the guest mounts it `ro` (Btrfs degrades the
+  rw mount silently, so `/init` detects the mode from
+  `/proc/mounts`), exports it `ro`, prints a READ-ONLY banner, and
+  writes fail with EROFS.
+- **Unformatted-disk safety** (`boot-unformatted.log`): a zeroed
+  image booted without `btrfs_format=1` produces the
+  not-mounted warning and its sha256 is **unchanged** after the
+  session (`IMAGE_UNCHANGED=True`) — the guest writes nothing.
+- **128 MiB boot** (`boot-mem128.log`): the guest reaches the banner
+  with NFS (2049), SMB and SSH (22) all listening; MemAvailable
+  ≈ 16 MiB, so 128 MiB is a floor, not a recommendation.
 
-**Not yet verified** (needs the real MacBook Pro):
+Not verified / failed off-device:
 
-- The Swift launcher actually running a VM (Actions covers the
-  compile, not VM startup).
+- **Host-side NFS mount**: this sandbox's kernel has no NFS client
+  (`mount.nfs: Protocol not supported` before contacting the
+  guest). The in-guest loopback mount of its own nfsd also timed
+  out (100 s, `MOUNT_RC=143`, twice). The authoritative host-mount
+  test therefore runs in CI (runner kernels have an NFS client)
+  and in the MBP session kit (`mount_nfs` from macOS).
+- **SMB tree connect**: the `usb` share lists via `smbclient -L`,
+  but tree connect fails with `NT_STATUS_BAD_NETWORK_NAME`
+  (guest-account mapping config applied; still failing). Open
+  item — retest with the macOS SMB client in the session kit.
+
+Bugs found by these tests and fixed: a busybox self-symlink that
+made `/bin/sh` unexecutable (ELOOP at boot), `/proc/cmdline` read
+before proc was mounted (the format flag was ignored),
+host/glibc-mixed libraries (`GLIBC_2.38 not found`), a missing
+transitive library (`libgmp` for dropbear), a missing
+`/etc/services` (rpc.nfsd could not resolve the `nfs` port), a
+missing `libgcc_s.so.1` (glibc dlopens it for `pthread_cancel`;
+`btrfs scrub` aborted without it), the ksmbd config written to
+`ksmbd.conf` instead of Debian's `ksmb.conf` (share never
+registered), read-only mode inferred from mount success instead
+of `/proc/mounts` (Btrfs degrades silently), and a test-driver
+deadlock (`BufferedReader.read(n)` waiting for a full buffer
+against an idle guest — use `read1`).
+
+### Intel Mac CI (`.github/workflows/launcher-intel-mac.yml`)
+
+On `macos-15-intel`: release build + codesign/entitlement check +
+`--help` smoke test (run 45935251632 green in 1m17s after the first
+run caught three real compile errors), **refusal-path tests**
+(disk0 refused, ack flag required, partition path refused, missing
+kernel file — all asserted to exit non-zero with the expected
+message before any VM is created), and `plutil -lint` of the
+launchd plist. A parallel `ubuntu-latest` job runs `sh -n` over
+all shell scripts. GitHub runners cannot start a
+Virtualization.framework VM, so this covers compilation and the
+launcher's pre-VM logic only.
+
+### Not yet verified — MBP only (session kit)
+
+Kept deliberately short; all of it is in
+`host/session-kit/` (`run-session.sh` + `CHECKLIST.md`), designed
+for one sitting:
+
+- The launcher actually starting a VM under
+  Virtualization.framework (image mode first, then raw USB).
 - Raw-device passthrough of a physical USB disk, including the
-  `diskutil` claim flow and internal-disk refusal paths.
-- VZ NAT addressing (192.168.64.0/24) and the guest-IP banner under
-  the launcher, and a host-side `mount_nfs` / SMB mount from macOS
-  against the guest exports (in-guest listeners are proven; a real
-  macOS client mount is not).
-- launchd persistence across reboots on the MBP.
+  `diskutil` claim flow on a real external disk.
+- VZ NAT addressing (192.168.64.0/24) and guest-IP discovery from
+  the console log on macOS.
+- A macOS client mount of the exports (`mount_nfs`, and SMB —
+  which may also settle the smbclient tree-connect failure above).
+- launchd persistence across a reboot, pmset/AlDente state, and a
+  next-day soak check.

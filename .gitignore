@@ -1,7 +1,9 @@
 # Build scratch for the guest initramfs (recreatable by build-initramfs.sh)
 guest/build/
-# QEMU test disk image (recreatable)
+# QEMU test disk images (recreatable) and Python bytecode
 guest/test/test-disk.img
+guest/test/*-disk.img
+guest/test/__pycache__/
 # Swift build products
 launcher/.build/
 launcher/btrfs-vm
