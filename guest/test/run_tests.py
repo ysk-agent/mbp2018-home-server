@@ -146,15 +146,21 @@ def scenario_datapath():
     # 90-second grace period and the client must be allowed to retry
     # through it. The subprocess timeout (150s) is the bound instead.
     nfs_host_ok = False
-    try:
-        r = subprocess.run(["mount", "-t", "nfs", "-o",
-                            "vers=4,port=12049,mountport=12049",
-                            "127.0.0.1:/mnt/usb", mnt],
-                           capture_output=True, text=True, timeout=150)
-        nfs_host_ok = (r.returncode == 0)
-    except subprocess.TimeoutExpired:
-        class R: returncode = -1; stdout = ""; stderr = "mount timed out after 150s"
-        r = R()
+    r = None
+    for opts in ("vers=4,port=12049", "vers=4.0,port=12049",
+                 "vers=4,port=12049,nolock,proto=tcp"):
+        try:
+            r = subprocess.run(["mount", "-v", "-t", "nfs", "-o", opts,
+                                "127.0.0.1:/mnt/usb", mnt],
+                               capture_output=True, text=True, timeout=150)
+        except subprocess.TimeoutExpired:
+            class R: returncode = -1; stdout = ""; stderr = "mount timed out after 150s"
+            r = R()
+        g.host_say("mount attempt opts=%s rc=%d out=%s %s"
+                   % (opts, r.returncode, r.stdout, r.stderr))
+        if r.returncode == 0:
+            nfs_host_ok = True
+            break
     g.host_say("host mount.nfs rc=%d out=%s %s" % (r.returncode, r.stdout, r.stderr))
     if r.returncode == 0:
         with open(os.path.join(mnt, "HOST_NFS.txt"), "w") as f:
