@@ -54,8 +54,8 @@ jobs:
         run: |
           # Without this, mount.nfs fails with "Protocol not supported"
           # on the runner kernel (the module is present but not loaded).
-          sudo modprobe -a nfs nfsv4 || true
-          grep -w nfs /proc/filesystems || true
+          sudo modprobe -a nfs nfs4 nfsv4 || true
+          grep -E "nfs" /proc/filesystems || true
       - name: Datapath scenario (one boot — NFS + SMB + SSH + compression + scrub)
         run: sudo python3 guest/test/run_tests.py datapath
       - name: Assert key results in the log
