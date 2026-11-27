@@ -101,7 +101,7 @@ jobs:
       - name: Unformatted-disk no-write scenario (one boot)
         run: sudo python3 guest/test/run_tests.py unformatted
       - name: Assert key results in the log
-        run: grep -a "IMAGE_UNCHANGED=true" guest/test/boot-unformatted.log
+        run: grep -a "IMAGE_UNCHANGED=True" guest/test/boot-unformatted.log
       - name: Upload guest test log
         if: always()
         uses: actions/upload-artifact@v4

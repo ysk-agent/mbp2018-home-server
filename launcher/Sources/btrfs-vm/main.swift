@@ -220,7 +220,7 @@ final class Delegate: NSObject, VZVirtualMachineDelegate {
 
 // MARK: - Main
 
-let options = parseArgs(CommandLine.arguments)
+let options = parseArgs(Array(CommandLine.arguments.dropFirst()))
 guard let kernelPath = options.kernel, let initrdPath = options.initrd else {
     fail("--kernel and --initrd are required")
 }
