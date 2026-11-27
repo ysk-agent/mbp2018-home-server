@@ -252,12 +252,19 @@ if let imagePath = options.deviceImage {
     let (diskName, rawPath) = validateRawDevice(options.device!)
     claimDisk(diskName)
     let handle: FileHandle
-    do {
-        handle = options.readOnly
-            ? try FileHandle(forReadingFrom: URL(fileURLWithPath: rawPath))
-            : try FileHandle(forUpdatingAtPath: rawPath)
-    } catch {
-        fail("could not open \(rawPath) (raw devices need root — run via sudo / the LaunchDaemon): \(error)")
+    if options.readOnly {
+        do {
+            handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: rawPath))
+        } catch {
+            fail("could not open \(rawPath): \(error)")
+        }
+    } else {
+        // FileHandle(forUpdatingAtPath:) is the non-throwing, Optional-
+        // returning Objective-C initializer — unlike forReadingFrom above.
+        guard let h = FileHandle(forUpdatingAtPath: rawPath) else {
+            fail("could not open \(rawPath) (raw devices need root — run via sudo / the LaunchDaemon)")
+        }
+        handle = h
     }
     let attachment: VZDiskBlockDeviceStorageDeviceAttachment
     do {
@@ -281,11 +288,15 @@ let console = ConsoleFanOut(logFilePath: options.logFile)
 let serialAttachment = VZFileHandleSerialPortAttachment(
     fileHandleForReading: FileHandle.standardInput,
     fileHandleForWriting: console.writeHandle)
-let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration(attachment: serialAttachment)
+// These two configurations have no attachment-taking initializer:
+// create them empty and assign the attachment property.
+let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
+serialPort.attachment = serialAttachment
 
 // Network: VZ NAT. The guest receives a 192.168.64.0/24 address by DHCP
 // and prints it to the serial console.
-let network = VZVirtioNetworkDeviceConfiguration(attachment: VZNATNetworkDeviceAttachment())
+let network = VZVirtioNetworkDeviceConfiguration()
+network.attachment = VZNATNetworkDeviceAttachment()
 
 let config = VZVirtualMachineConfiguration()
 config.cpuCount = options.cpus
