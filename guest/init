@@ -47,8 +47,16 @@ if command -v udhcpc >/dev/null; then
 fi
 [ -z "$IP" ] && IP="(no DHCP lease — check the VZ NAT network)"
 
+# Kernel-cmdline overrides: nfs_allow=<host-or-subnet>[,<more>...]
+# (comma-separated, default is the VZ NAT subnet).
+NFS_ALLOW=192.168.64.0/24
+for tok in $CMDLINE; do
+    case "$tok" in nfs_allow=*) NFS_ALLOW=${tok#nfs_allow=} ;; esac
+done
+
 # --- 3. Btrfs mount ---------------------------------------------------
 MOUNTED=0
+READONLY=0
 i=0
 while [ ! -b /dev/vda ] && [ $i -lt 20 ]; do sleep 0.5; i=$((i+1)); done
 
@@ -56,6 +64,13 @@ if [ -b /dev/vda ]; then
     btrfs device scan >/dev/null 2>&1
     if mount -t btrfs -o compress=zstd,noatime /dev/vda /mnt/usb 2>/tmp/mount.err; then
         MOUNTED=1
+    elif mount -t btrfs -o ro,compress=zstd,noatime /dev/vda /mnt/usb 2>/tmp/mount-ro.err; then
+        # The launcher's --read-only attaches the disk read-only, so the
+        # rw mount above must fail. Fall back to a read-only mount
+        # instead of giving up entirely.
+        MOUNTED=1
+        READONLY=1
+        say "mounted /dev/vda READ-ONLY (rw mount failed: $(cat /tmp/mount.err))"
     else
         say "mount of /dev/vda failed: $(cat /tmp/mount.err)"
         case "$CMDLINE" in
@@ -80,6 +95,14 @@ else
     say "ERROR: /dev/vda never appeared — is a disk attached?"
 fi
 
+# Btrfs can mount a read-only device read-only WITHOUT failing the
+# rw mount request (it degrades silently), so READONLY cannot be
+# inferred from which mount command succeeded. Ask the kernel.
+if [ $MOUNTED -eq 1 ] && grep -q " /mnt/usb btrfs ro" /proc/mounts; then
+    READONLY=1
+    say "/mnt/usb is mounted read-only (device is read-only); exports will be ro"
+fi
+
 # --- 4. exports --------------------------------------------------------
 if [ $MOUNTED -eq 1 ]; then
     # -- kernel NFS (primary export) --
@@ -87,10 +110,18 @@ if [ $MOUNTED -eq 1 ]; then
         mkdir -p /var/lib/nfs/rpc_pipefs /var/lib/nfs/v4recovery
         mount -t rpc_pipefs sunrpc /var/lib/nfs/rpc_pipefs 2>/dev/null
         mount -t nfsd nfsd /proc/fs/nfsd 2>/dev/null
-        # NFS export, restricted to the VZ NAT subnet (host-only in
+        # NFS export, restricted to the allowed subnet(s) (host-only in
         # practice). no_root_squash because the only client is the host
-        # itself; see README "Security notes".
-        echo "/mnt/usb 192.168.64.0/24(rw,sync,no_subtree_check,insecure,no_root_squash)" > /etc/exports
+        # itself; see README "Security notes". nfs_allow= on the kernel
+        # cmdline overrides the default VZ NAT subnet (comma-separated).
+        NFS_MODE=rw
+        [ $READONLY -eq 1 ] && NFS_MODE=ro
+        NFS_HOSTS=$(echo "$NFS_ALLOW" | tr ',' ' ')
+        EXPORTS_LINE="/mnt/usb"
+        for h in $NFS_HOSTS; do
+            EXPORTS_LINE="$EXPORTS_LINE $h($NFS_MODE,sync,no_subtree_check,insecure,no_root_squash)"
+        done
+        echo "$EXPORTS_LINE" > /etc/exports
         # NFSv4 only: v4 needs no portmapper/rpcbind (clients connect
         # to tcp/2049 directly), and rpcbind proved unreliable in this
         # minimal initramfs (daemonizes, then exits silently). rpcbind
@@ -98,7 +129,7 @@ if [ $MOUNTED -eq 1 ]; then
         exportfs -ra 2>/dev/null
         if [ -x /usr/sbin/rpc.nfsd ]; then
             rpc.nfsd --no-nfs-version 3 2 \
-                && say "NFSv4 export up: 192.168.64.0/24 -> /mnt/usb" \
+                && say "NFSv4 export up: $NFS_ALLOW ($NFS_MODE) -> /mnt/usb" \
                 || say "rpc.nfsd failed (see console log)"
         fi
     else
@@ -110,20 +141,31 @@ if [ $MOUNTED -eq 1 ]; then
     *)
         if modprobe ksmbd 2>/dev/null && [ -x /usr/sbin/ksmbd.mountd ]; then
             mkdir -p /etc/ksmbd
-            cat > /etc/ksmbd/ksmbd.conf <<'EOF'
+            # Debian ksmbd-tools reads /etc/ksmbd/ksmb.conf by default;
+            # writing only ksmbd.conf left the share unregistered
+            # (smbclient: NT_STATUS_BAD_NETWORK_NAME in the QEMU test).
+            cat > /etc/ksmbd/ksmb.conf <<'EOF'
 [global]
     workgroup = WORKGROUP
     server string = btrfs-vm
     netbios name = BTRFSVM
     server max protocol = SMB3
     guest ok = yes
+    guest account = nobody
+    map to guest = Bad User
 [usb]
     path = /mnt/usb
-    read only = no
+    read only = READONLY_PLACEHOLDER
     guest ok = yes
     create mask = 0664
     directory mask = 0775
 EOF
+            if [ $READONLY -eq 1 ]; then
+                sed -i 's/read only = READONLY_PLACEHOLDER/read only = yes/' /etc/ksmbd/ksmb.conf
+            else
+                sed -i 's/read only = READONLY_PLACEHOLDER/read only = no/' /etc/ksmbd/ksmb.conf
+            fi
+            cp /etc/ksmbd/ksmb.conf /etc/ksmbd/ksmbd.conf
             ksmbd.mountd && say "SMB export up: \\\\guest\\usb (guest access)"
         fi
         ;;
@@ -131,13 +173,18 @@ EOF
 
     # Persistent dropbear host keys + authorized_keys live on the USB
     # disk itself, so they survive reboots of the (stateless) guest.
-    mkdir -p /mnt/usb/.btrfs-vm/dropbear /mnt/usb/.btrfs-vm/ssh
+    # On a read-only mount nothing may be written to the disk: skip key
+    # generation entirely (dropbear -R makes ephemeral keys instead)
+    # and only read an existing authorized_keys.
     mkdir -p /etc/dropbear /root/.ssh
-    for k in rsa ecdsa ed25519; do
-        f=/mnt/usb/.btrfs-vm/dropbear/dropbear_${k}_host_key
-        [ -f "$f" ] || dropbearkey -t $k -f "$f" >/dev/null 2>&1
-        [ -f "$f" ] && ln -sf "$f" /etc/dropbear/
-    done
+    if [ $READONLY -eq 0 ]; then
+        mkdir -p /mnt/usb/.btrfs-vm/dropbear /mnt/usb/.btrfs-vm/ssh
+        for k in rsa ecdsa ed25519; do
+            f=/mnt/usb/.btrfs-vm/dropbear/dropbear_${k}_host_key
+            [ -f "$f" ] || dropbearkey -t $k -f "$f" >/dev/null 2>&1
+            [ -f "$f" ] && ln -sf "$f" /etc/dropbear/
+        done
+    fi
     [ -f /mnt/usb/.btrfs-vm/ssh/authorized_keys ] && \
         cp /mnt/usb/.btrfs-vm/ssh/authorized_keys /root/.ssh/authorized_keys
 fi
@@ -155,7 +202,12 @@ echo ""
 echo "=============================================================="
 if [ $MOUNTED -eq 1 ]; then
     echo " btrfs-vm guest up: IP $IP"
-    echo " /mnt/usb mounted from /dev/vda (btrfs, compress=zstd,noatime)"
+    if [ $READONLY -eq 1 ]; then
+        echo " /mnt/usb mounted READ-ONLY from /dev/vda (btrfs, ro,compress=zstd,noatime)"
+        echo " NOTE: disk is READ-ONLY — exports are read-only, writes will fail."
+    else
+        echo " /mnt/usb mounted from /dev/vda (btrfs, compress=zstd,noatime)"
+    fi
     df -h /mnt/usb 2>/dev/null | tail -1
     echo " Host: mount_nfs -o vers=4 <guest-ip>:/mnt/usb /Volumes/usb"
     echo "       or SMB smb://<guest-ip>/usb , or ssh root@<guest-ip>"

@@ -207,6 +207,13 @@ done
 LD_SRC=$(find_lib ld-linux-x86-64.so.2)
 [ -n "$LD_SRC" ] && { mkdir -p "$ROOTFS/lib64"; cp -L "$LD_SRC" "$ROOTFS/lib64/ld-linux-x86-64.so.2"; }
 
+# libgcc_s.so.1 is not in any DT_NEEDED list: glibc dlopen()s it at
+# runtime for pthread_cancel, and btrfs-progs' scrub abort()s without
+# it ("libgcc_s.so.1 must be installed for pthread_cancel to work",
+# seen in the QEMU datapath test). Force-copy it from staging.
+GCC_SRC=$(find_lib libgcc_s.so.1)
+[ -n "$GCC_SRC" ] && cp -L "$GCC_SRC" "$ROOTFS/lib/x86_64-linux-gnu/libgcc_s.so.1"
+
 # rpcbind needs its runtime dir + the nfs idmap helper config files.
 mkdir -p "$ROOTFS/run/rpcbind" "$ROOTFS/var/lib/nfs/sm" "$ROOTFS/var/lib/nfs/sm.bak"
 [ -f "$STAGING/etc/idmapd.conf" ] && cp "$STAGING/etc/idmapd.conf" "$ROOTFS/etc/" || true
