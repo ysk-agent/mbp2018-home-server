@@ -267,16 +267,22 @@ Verified (log in `guest/test/` for each):
 
 Not verified / failed off-device:
 
-- **Host-side NFS mount**: this sandbox's kernel has no NFS client
-  (`mount.nfs: Protocol not supported` before contacting the
-  guest). The in-guest loopback mount of its own nfsd also timed
-  out (100 s, `MOUNT_RC=143`, twice). The authoritative host-mount
-  test therefore runs in CI (runner kernels have an NFS client)
-  and in the MBP session kit (`mount_nfs` from macOS).
+- **Host-side NFS mount**: unverified in every off-device
+  environment tried. This sandbox's kernel has no NFS client at
+  all. In CI the runner's nfs/nfs4 modules load, yet the mount
+  still fails: `Protocol not supported` when a `mountport` option
+  is passed, and a negotiation hang (150 s timeout, three option
+  variants) through QEMU slirp hostfwd without it. The in-guest
+  loopback mount of its own nfsd also timed out (same-kernel
+  client+server is not a valid test; removed). Whether the fault
+  is the slirp path, the minimal nfsd setup, or the client is
+  undecided — the authoritative test is the MBP session kit
+  (`mount_nfs` from macOS over VZ NAT, no slirp involved).
 - **SMB tree connect**: the `usb` share lists via `smbclient -L`,
-  but tree connect fails with `NT_STATUS_BAD_NETWORK_NAME`
-  (guest-account mapping config applied; still failing). Open
-  item — retest with the macOS SMB client in the session kit.
+  but tree connect fails with `NT_STATUS_BAD_NETWORK_NAME`, both
+  locally and in CI (guest-account mapping config applied; still
+  failing). Open item — retest with the macOS SMB client in the
+  session kit.
 
 Bugs found by these tests and fixed: a busybox self-symlink that
 made `/bin/sh` unexecutable (ELOOP at boot), `/proc/cmdline` read
@@ -303,7 +309,12 @@ message before any VM is created), and `plutil -lint` of the
 launchd plist. A parallel `ubuntu-latest` job runs `sh -n` over
 all shell scripts. GitHub runners cannot start a
 Virtualization.framework VM, so this covers compilation and the
-launcher's pre-VM logic only.
+launcher's pre-VM logic only. The refusal tests earned their keep
+on their first run: they caught that `parseArgs` was being handed
+`CommandLine.arguments` including argv[0], so *every* real
+invocation fell into `usage()` — the `--help` smoke test had been
+passing vacuously, because usage is what it prints anyway. Fixed
+by dropping argv[0]; refusal tests green from run 45939494322.
 
 ### Not yet verified — MBP only (session kit)
 
